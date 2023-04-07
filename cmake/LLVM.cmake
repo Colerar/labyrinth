@@ -1,7 +1,9 @@
-if (NOT DEFINED ENV{LLVM_HOME})
-    message(FATAL_ERROR "$LLVM_HOME is not defined")
+if (NOT DEFINED ENV{LLVM_DIR})
+    if (NOT DEFINED ENV{LLVM_HOME})
+        message(FATAL_ERROR "$LLVM_HOME is not defined")
+    endif ()
+    set(ENV{LLVM_DIR} $ENV{LLVM_HOME}/lib/cmake/llvm)
 endif ()
-set(ENV{LLVM_DIR} $ENV{LLVM_HOME}/lib/cmake/llvm)
 
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
