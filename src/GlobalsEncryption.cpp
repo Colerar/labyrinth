@@ -13,9 +13,9 @@ using Random = effolkronium::random_thread_local;
 
 using llvm::BLAKE3;
 using llvm::Constant, llvm::ConstantInt, llvm::ConstantArray,
-    llvm::ConstantDataArray, llvm::Type, llvm::ArrayType, llvm::IntegerType,
-    llvm::Function, llvm::FunctionType, llvm::BasicBlock, llvm::IRBuilder,
-    llvm::GlobalVariable;
+    llvm::ConstantDataArray, llvm::Type, llvm::ArrayType, llvm::StructType,
+    llvm::IntegerType, llvm::Function, llvm::FunctionType, llvm::BasicBlock,
+    llvm::IRBuilder, llvm::GlobalVariable;
 using llvm::errs, llvm::outs, llvm::toHex;
 using llvm::Module, llvm::ModuleAnalysisManager, llvm::PreservedAnalyses;
 
@@ -30,15 +30,27 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
     for (auto &gv : M.getGlobalList()) {
       bool is_int_ty = gv.getValueType()->isIntegerTy();
       bool is_arr_ty = gv.getValueType()->isArrayTy();
-      if (!is_arr_ty && !is_int_ty)
-        continue;
+      bool is_struct_ty = gv.getValueType()->isStructTy();
       if (!gv.hasInitializer())
         continue;
       if (gv.getSection() == "llvm.metadata")
         continue;
+
+#if LLVM_VERSION_MAJOR <= 15
+      if (only_str && !gv.getName().startswith(".str"))
+        continue;
+#elif LLVM_VERSION_MAJOR == 16
       if (only_str && !gv.getName().starts_with(".str"))
         continue;
+#elif
+#error "Unsupported LLVM Version"
+#endif
+
       auto *init = gv.getInitializer();
+      // zero initializer
+      if (llvm::isa<llvm::ConstantAggregateZero>(init)) {
+        continue;
+      }
 
       if (is_int_ty) {
         auto *data = cast<ConstantInt>(init);
@@ -49,40 +61,56 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
         gv.setInitializer(encrypted);
         gv.setConstant(false);
         insertIntDecryption(M, &gv, key, priority);
-      } else if (isa<ConstantDataArray>(init) &&
-                 isa<ArrayType>(gv.getValueType()) &&
-                 isa<IntegerType>(gv.getValueType()->getArrayElementType())) {
+      } else if (is_arr_ty) {
+        if (!isa<ConstantDataArray>(init)) {
+          continue;
+        }
         auto *data = cast<ConstantDataArray>(init);
-        auto *gv_ele_ty =
-            cast<IntegerType>(gv.getValueType()->getArrayElementType());
-        uint64_t mask = gv_ele_ty->getBitMask();
-        auto rand = [&]() { return Random::get<uint64_t>() & mask; };
-        std::array<uint64_t, 8> keys = {
-            rand(), rand(), rand(), rand(), rand(), rand(), rand(), rand(),
-        };
-        auto raw_data = data->getRawDataValues();
-
-        switch (gv_ele_ty->getBitWidth()) {
-        case 8:
-          labyrinth::xor_with_keys<uint8_t>(raw_data, keys);
-          break;
-        case 16:
-          labyrinth::xor_with_keys<uint16_t>(raw_data, keys);
-          break;
-        case 32:
-          labyrinth::xor_with_keys<uint32_t>(raw_data, keys);
-          break;
-        case 64:
-          labyrinth::xor_with_keys<uint64_t>(raw_data, keys);
-          break;
-        default:
+        if (isa<ArrayType>(gv.getValueType())) {
+          continue;
+        }
+        auto *arr_ty = cast<ArrayType>(gv.getValueType());
+        if (isa<IntegerType>(arr_ty->getElementType())) {
+          continue;
+        }
+        auto *ele_ty = cast<IntegerType>(arr_ty->getArrayElementType());
+        auto keys = rand_with_ty<8>(ele_ty);
+        if (!xor_bit_width_with_keys(ele_ty->getBitWidth(),
+                                     data->getRawDataValues(), keys)) {
           errs() << "GlobalEncryption unsupported integer width: "
-                 << gv_ele_ty->getBitWidth() << "\n";
-          return PreservedAnalyses::all();
+                 << ele_ty->getBitWidth() << "\n";
+          continue;
+        }
+        gv.setConstant(false);
+        insertArrayDecryption(M, &gv, arr_ty, ele_ty, keys, priority);
+      } else if (is_struct_ty) {
+        // Rust str and arr
+        auto *data = cast<llvm::ConstantStruct>(init);
+        auto struct_ty = data->getType();
+        if (struct_ty->getNumElements() != 1) {
+          continue;
+        }
+        auto first = data->getAggregateElement(0U);
+        if (!isa<ConstantDataArray>(first)) {
+          continue;
+        }
+        auto *inner_arr = cast<ConstantDataArray>(first);
+        if (!isa<IntegerType>(inner_arr->getElementType())) {
+          continue;
+        }
+        auto *inner_ele_ty = cast<IntegerType>(inner_arr->getElementType());
+
+        auto keys = rand_with_ty<8>(inner_ele_ty);
+        if (!xor_bit_width_with_keys(inner_ele_ty->getBitWidth(),
+                                     inner_arr->getRawDataValues(), keys)) {
+          errs() << "GlobalEncryption unsupported integer width: "
+                 << inner_ele_ty->getBitWidth() << "\n";
+          continue;
         }
 
         gv.setConstant(false);
-        insertArrayDecryption(M, &gv, gv_ele_ty, keys, priority);
+        insertArrayDecryption(M, &gv, inner_arr->getType(), inner_ele_ty, keys,
+                              priority);
       }
     }
   }
@@ -123,12 +151,11 @@ void insertIntDecryption(Module &M, GlobalVariable *gv, uint64_t key,
 }
 
 void insertArrayDecryption(llvm::Module &M, llvm::GlobalVariable *gv,
-                           llvm::IntegerType *gv_ele_ty,
+                           llvm::ArrayType *arr_ty, llvm::IntegerType *ele_ty,
                            std::array<uint64_t, 8> &keys, int priority) {
   auto &cx = M.getContext();
   auto ir = IRBuilder(cx);
 
-  auto *gv_ty = cast<ArrayType>(gv->getValueType());
   auto i32_ty = IntegerType::getInt32Ty(cx);
 
   auto callee =
@@ -148,16 +175,16 @@ void insertArrayDecryption(llvm::Module &M, llvm::GlobalVariable *gv,
   // start:
   ir.SetInsertPoint(entry);
   auto get_key = [&](std::size_t idx) {
-    return ConstantInt::get(gv_ele_ty, keys[idx]);
+    return ConstantInt::get(ele_ty, keys[idx]);
   };
   std::array<Constant *, 8> const_keys{
       get_key(0), get_key(1), get_key(2), get_key(3),
       get_key(4), get_key(5), get_key(6), get_key(7),
   };
   auto const_key_arr =
-      ConstantArray::get(ArrayType::get(gv_ele_ty, 8), const_keys);
+      ConstantArray::get(ArrayType::get(ele_ty, 8), const_keys);
 
-  auto keys_arr_ptr = ir.CreateAlloca(gv_ele_ty, const_i32_8, "keys_arr_ptr");
+  auto keys_arr_ptr = ir.CreateAlloca(ele_ty, const_i32_8, "keys_arr_ptr");
   ir.CreateStore(const_key_arr, keys_arr_ptr, "keys_arr_ptr");
   auto idx_ptr = ir.CreateAlloca(i32_ty, const_i32_1, "idx_ptr");
   ir.CreateStore(const_i32_0, idx_ptr);
@@ -167,24 +194,31 @@ void insertArrayDecryption(llvm::Module &M, llvm::GlobalVariable *gv,
   // for.cond:
   ir.SetInsertPoint(for_cond);
   auto idx_load = ir.CreateLoad(i32_ty, idx_ptr);
-  auto cmp_inst =
-      ir.CreateICmpULT(idx_load, ConstantInt::get(IntegerType::getInt32Ty(cx),
-                                                  gv_ty->getNumElements()));
+  auto cmp_inst = ir.CreateICmpULT(
+      idx_load, ConstantInt::get(i32_ty, arr_ty->getNumElements()));
   ir.CreateCondBr(cmp_inst, for_body, ret);
 
   // for.body:
   ir.SetInsertPoint(for_body);
   auto idx = ir.CreateLoad(i32_ty, idx_ptr, "idx");
 
-  auto gv_ele_ptr = ir.CreateGEP(gv_ele_ty, gv, {idx}, "gv_ele_ptr");
-  auto gv_ele = ir.CreateLoad(gv_ele_ty, gv_ele_ptr, "gv_ele");
+  llvm::Value *arr_ele_ptr;
+  if (gv->getValueType()->isStructTy()) {
+    auto struct_ptr = ir.CreateGEP(gv->getValueType(), gv,
+                                   {const_i32_0, const_i32_0}, "struct_ptr");
+    arr_ele_ptr =
+        ir.CreateGEP(arr_ty, struct_ptr, {const_i32_0, idx}, "arr_ele_ptr");
+  } else {
+    arr_ele_ptr = ir.CreateGEP(ele_ty, gv, {idx}, "arr_ele_ptr");
+  }
+  auto gv_ele = ir.CreateLoad(ele_ty, arr_ele_ptr, "gv_ele");
 
   auto key_idx = ir.CreateSRem(idx, const_i32_8, "key_idx");
-  auto key_ptr = ir.CreateGEP(gv_ele_ty, keys_arr_ptr, {key_idx}, "key_ptr");
-  auto key = ir.CreateLoad(gv_ele_ty, key_ptr);
+  auto key_ptr = ir.CreateGEP(ele_ty, keys_arr_ptr, {key_idx}, "key_ptr");
+  auto key = ir.CreateLoad(ele_ty, key_ptr);
 
   auto decrypted = ir.CreateXor(key, gv_ele, "decrypted");
-  ir.CreateStore(decrypted, gv_ele_ptr);
+  ir.CreateStore(decrypted, arr_ele_ptr);
 
   auto sum = ir.CreateAdd(idx, const_i32_1);
   ir.CreateStore(sum, idx_ptr);
