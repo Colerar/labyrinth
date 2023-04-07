@@ -1,0 +1,8 @@
+/cmake-build*
+/build*
+
+/cmake/custom.cmake
+
+/.idea
+
+.DS_Store
