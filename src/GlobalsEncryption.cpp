@@ -66,11 +66,11 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
           continue;
         }
         auto *data = cast<ConstantDataArray>(init);
-        if (isa<ArrayType>(gv.getValueType())) {
+        if (!isa<ArrayType>(gv.getValueType())) {
           continue;
         }
         auto *arr_ty = cast<ArrayType>(gv.getValueType());
-        if (isa<IntegerType>(arr_ty->getElementType())) {
+        if (!isa<IntegerType>(arr_ty->getElementType())) {
           continue;
         }
         auto *ele_ty = cast<IntegerType>(arr_ty->getArrayElementType());
