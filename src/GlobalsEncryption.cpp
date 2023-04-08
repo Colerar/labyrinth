@@ -35,16 +35,8 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
         continue;
       if (gv.getSection() == "llvm.metadata")
         continue;
-
-#if LLVM_VERSION_MAJOR <= 15
       if (only_str && !gv.getName().startswith(".str"))
         continue;
-#elif LLVM_VERSION_MAJOR == 16
-      if (only_str && !gv.getName().starts_with(".str"))
-        continue;
-#elif
-#error "Unsupported LLVM Version"
-#endif
 
       auto *init = gv.getInitializer();
       // zero initializer
