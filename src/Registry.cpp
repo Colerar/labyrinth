@@ -1,8 +1,9 @@
 #include "labyrinth/Registry.h"
+#include "labyrinth/Flattening.h"
 #include "labyrinth/GlobalsEncryption.h"
 #include "llvm/Passes/PassPlugin.h"
 
-using labyrinth::GlobalsEncryptionPass;
+using labyrinth::GlobalsEncryptionPass, labyrinth::FlatteningPass;
 using llvm::ModulePassManager, llvm::OptimizationLevel;
 using llvm::outs, llvm::errs;
 using llvm::StringRef;
@@ -37,6 +38,25 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
     manager.addPass(GlobalsEncryptionPass(only_str, obf_time));
     return true;
   });
+  builder.registerPipelineParsingCallback(
+      [](StringRef args, ModulePassManager &manager, auto) {
+        uint32_t width = 128;
+        bool status = parseArgs(args, "fla", [&](StringRef k, StringRef v) {
+          if (k.equals_insensitive("width")) {
+            if (!to_integer(v, width, 10) || width < 32 || width > 512) {
+              errs() << "Invalid value for `" << k << "`: " << v << '\n';
+              return false;
+            }
+          }
+          return true;
+        });
+        if (!status) {
+          return false;
+        }
+
+        manager.addPass(FlatteningPass(width));
+        return true;
+      });
 }
 
 bool parseArgs(
