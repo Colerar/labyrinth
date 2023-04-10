@@ -26,12 +26,9 @@ using llvm::Module, llvm::ModuleAnalysisManager, llvm::PreservedAnalyses;
 using llvm::SmallVector;
 
 namespace labyrinth {
-auto FlatteningPass::run(Module &M, ModuleAnalysisManager &AM)
+auto FlatteningPass::run(Module &M, ModuleAnalysisManager &AM) const
     -> PreservedAnalyses {
-  auto update_fn = insert_update_key_fn(M);
   for (auto &fn : M.functions()) {
-    if (std::addressof(fn) == update_fn)
-      continue;
     flatten(&fn);
   }
 

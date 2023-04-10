@@ -10,14 +10,12 @@ class FlatteningPass : public llvm::PassInfoMixin<FlatteningPass> {
 public:
   uint32_t switch_bit_width;
   llvm::PreservedAnalyses run(llvm::Module &M,
-                                     llvm::ModuleAnalysisManager &AM);
+                                     llvm::ModuleAnalysisManager &AM) const;
   explicit FlatteningPass(uint32_t switch_bit_width);
   void flatten(llvm::Function *fn) const;
 };
 
 void fix_stack(llvm::Function *F);
-
-llvm::Function *insert_update_key_fn(llvm::Module &M);
 
 } // namespace labyrinth
 
