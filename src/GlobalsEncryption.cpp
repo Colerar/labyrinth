@@ -127,6 +127,7 @@ void insertIntDecryption(Module &M, GlobalVariable *gv, uint64_t key,
   auto fn_name = genHashedName(gv, priority);
   auto callee = M.getOrInsertFunction(fn_name, fn_ty);
   auto *fn = cast<Function>(callee.getCallee());
+  fn->setLinkage(llvm::GlobalValue::InternalLinkage);
 
   auto ir = IRBuilder(cx);
 
@@ -153,6 +154,7 @@ void insertArrayDecryption(llvm::Module &M, llvm::GlobalVariable *gv,
       M.getOrInsertFunction(labyrinth::genHashedName(gv, priority),
                             FunctionType::get(Type::getVoidTy(cx), false));
   auto *fn = cast<Function>(callee.getCallee());
+  fn->setLinkage(llvm::GlobalValue::InternalLinkage);
 
   auto entry = BasicBlock::Create(cx, "entry", fn);
   auto for_cond = BasicBlock::Create(cx, "for.cond", fn);
