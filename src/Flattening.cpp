@@ -1,14 +1,10 @@
 #include "labyrinth/Flattening.h"
 
 #include "effolkronium/random.hpp"
-#include "labyrinth/Utils.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
-
-#include <array>
-#include <cassert>
 
 using Random = effolkronium::random_thread_local;
 
@@ -28,8 +24,12 @@ using llvm::SmallVector;
 namespace labyrinth {
 auto FlatteningPass::run(Module &M, ModuleAnalysisManager &AM) const
     -> PreservedAnalyses {
+  SmallVector<Function *, 16> fns;
   for (auto &fn : M.functions()) {
-    flatten(&fn);
+    fns.emplace_back(&fn);
+  }
+  for (auto fn : fns) {
+    flatten(&M, fn);
   }
 
   return PreservedAnalyses::all();
@@ -57,7 +57,67 @@ void fix_stack(Function *F) {
   }
 }
 
-void FlatteningPass::flatten(Function *f) const {
+Function *insert_update_fn(Module *M, BasicBlock *i,
+                           std::unordered_map<BasicBlock *, uint32_t> &idx_map,
+                           const SmallVector<BasicBlock *, 8> &doms,
+                           IntegerType *switch_ty) {
+  auto &cx = M->getContext();
+  auto DL = M->getDataLayout();
+  auto bool_ty = Type::getIntNTy(cx, 1);
+  auto opaque_ptr_ty = llvm::PointerType::get(cx, DL.getAllocaAddrSpace());
+  auto i32_ty = IntegerType::getInt32Ty(cx);
+
+  FunctionType *fn_ty = FunctionType::get(Type::getVoidTy(cx),
+                                          {
+                                              opaque_ptr_ty,
+                                              opaque_ptr_ty,
+                                              opaque_ptr_ty,
+                                          },
+                                          false);
+  Function *fn = Function::Create(fn_ty, GlobalValue::PrivateLinkage,
+                                  "labyrinth_fla_update_key", M);
+  auto iter = fn->arg_begin();
+  Value *flag_arr = iter, *case_arr = ++iter, *key_arr = ++iter;
+
+  auto *entry = BasicBlock::Create(cx, "entry", fn);
+  auto *body = BasicBlock::Create(cx, "body", fn);
+  auto *ret = BasicBlock::Create(cx, "ret", fn);
+
+  // entry
+  IRBuilder<> ir(entry);
+  auto flag_ptr = ir.CreateGEP(
+      bool_ty, flag_arr, {ConstantInt::get(i32_ty, idx_map[i])}, "flag_ptr");
+  auto flag = ir.CreateLoad(bool_ty, flag_ptr, "flag");
+  auto visited = ir.CreateICmpEQ(flag, ConstantInt::get(bool_ty, 1), "visited");
+  ir.CreateCondBr(visited, ret, body);
+
+  // body
+  ir.SetInsertPoint(body);
+  ir.CreateStore(ConstantInt::get(bool_ty, 1), flag_ptr);
+  for (auto dom : doms) {
+    if (dom == i)
+      continue;
+    auto dom_idx = ConstantInt::get(i32_ty, idx_map[dom]);
+    auto i_idx = ConstantInt::get(i32_ty, idx_map[i]);
+
+    auto case_ptr = ir.CreateGEP(switch_ty, case_arr, {dom_idx}, "case_ptr");
+    auto key_ptr = ir.CreateGEP(switch_ty, key_arr, {i_idx}, "key_ptr");
+
+    auto enc_case = ir.CreateLoad(switch_ty, case_ptr, "enc_case");
+    auto key = ir.CreateLoad(switch_ty, key_ptr, "key");
+
+    auto dec_case = ir.CreateXor(enc_case, key, "dec_case");
+    ir.CreateStore(dec_case, case_ptr);
+  }
+  ir.CreateBr(ret);
+
+  // ret
+  ir.SetInsertPoint(ret);
+  ir.CreateRetVoid();
+  return fn;
+}
+
+void FlatteningPass::flatten(Module *M, Function *f) const {
   SmallVector<BasicBlock *> orig_bb;
 
   // skip exception block
@@ -74,7 +134,8 @@ void FlatteningPass::flatten(Function *f) const {
 
   const DataLayout &DL = f->getParent()->getDataLayout();
   auto &cx = f->getContext();
-  auto switch_ty = IntegerType::getIntNTy(cx, switch_bit_width);
+  auto switch_ty = IntegerType::getIntNTy(cx, bit_width);
+  auto bool_ty = IntegerType::getIntNTy(cx, 1);
 
   // Nothing to flatten
   if (orig_bb.size() <= 1)
@@ -106,34 +167,29 @@ void FlatteningPass::flatten(Function *f) const {
   }
 
   std::unordered_map<BasicBlock *, uint32_t> idx_map(orig_bb.size());
-  SmallVector<ConstantInt *, 16> cases(orig_bb.size());
+  SmallVector<Constant *, 16> cases(orig_bb.size());
+  SmallVector<Constant *, 16> keys(orig_bb.size());
   {
     SmallVector<uint64_t, 16> rands(orig_bb.size());
     for (std::size_t i = 0; i < orig_bb.size(); i++) {
       auto b = orig_bb[i];
       idx_map[b] = i;
-      if (switch_bit_width <= 64) {
-        uint64_t rand = rand_unique<uint64_t>(rands);
-        rands.emplace_back(rand);
-        cases[i] = ConstantInt::get(switch_ty, rand & switch_ty->getBitMask());
-      } else {
-        uint32_t size = ceil(static_cast<double>(switch_bit_width) / 64);
-        std::vector<uint64_t> vec(size);
-        for (uint64_t &item : vec) {
-          uint64_t rand = rand_unique<uint64_t>(rands);
-          rands.emplace_back(rand);
-          item = rand;
-        }
-        uint32_t rem = switch_bit_width % 64;
-        if (rem != 0) {
-          vec.back() = vec.back() & IntegerType::get(cx, rem)->getBitMask();
-        }
-        cases[i] = cast<ConstantInt>(
-            ConstantInt::get(switch_ty, llvm::APInt(switch_bit_width, vec)));
-      }
+      uniq_int_rands<16, 16>(bit_width, rands, cases, switch_ty, i);
+      uniq_int_rands<16, 16>(bit_width, rands, keys, switch_ty, i);
     }
   }
-  auto get_case_const = [&](BasicBlock *b) -> ConstantInt * {
+  SmallVector<Constant *, 16> enc_cases(cases);
+  llvm::DominatorTree tree(*f);
+  for (auto i : orig_bb) {
+    for (auto j : orig_bb) {
+      if (i == j || !tree.dominates(i, j))
+        continue;
+      enc_cases[idx_map[j]] = ConstantInt::get(
+          switch_ty, cast<ConstantInt>(enc_cases[idx_map[j]])->getValue() ^
+                         cast<ConstantInt>(keys[idx_map[i]])->getValue());
+    }
+  }
+  auto get_case_const = [&](BasicBlock *b) -> Constant * {
     return cases[idx_map[b]];
   };
 
@@ -143,6 +199,27 @@ void FlatteningPass::flatten(Function *f) const {
   // Create switch variable and set as it
   auto switch_var = new AllocaInst(switch_ty, DL.getAllocaAddrSpace(),
                                    "switch_var", old_term);
+
+  auto switch_arr_ty = ArrayType::get(switch_ty, keys.size());
+  auto key_arr = new AllocaInst(switch_arr_ty, DL.getAllocaAddrSpace(),
+                                "key_arr", old_term);
+  auto enc_case_arr = new AllocaInst(switch_arr_ty, DL.getAllocaAddrSpace(),
+                                     "enc_case_arr", old_term);
+  auto visited_arr =
+      new AllocaInst(ArrayType::get(bool_ty, keys.size()),
+                     DL.getAllocaAddrSpace(), "visited_arr", old_term);
+  auto keys_const =
+      ConstantArray::get(ArrayType::get(switch_ty, keys.size()), keys);
+  new StoreInst(keys_const, key_arr, old_term);
+
+  auto enc_cases_arr_const = ConstantArray::get(
+      ArrayType::get(switch_ty, enc_cases.size()), enc_cases);
+  new StoreInst(enc_cases_arr_const, enc_case_arr, old_term);
+
+  SmallVector<Constant *, 16> zeros(keys.size());
+  std::fill_n(zeros.begin(), keys.size(), ConstantInt::get(bool_ty, 0));
+  new StoreInst(ConstantArray::get(ArrayType::get(bool_ty, keys.size()), zeros),
+                visited_arr, old_term);
 
   // Remove jump
   old_term->eraseFromParent();
@@ -181,27 +258,44 @@ void FlatteningPass::flatten(Function *f) const {
 
     // Add case to switch
     auto *numCase = get_case_const(i);
-    switchI->addCase(numCase, i);
+    switchI->addCase(cast<ConstantInt>(numCase), i);
   }
 
   // Recalculate switch_var
   for (BasicBlock *i : orig_bb) {
+    SmallVector<BasicBlock *, 8> doms;
+    for (BasicBlock *j : orig_bb) {
+      if (i == j || !tree.dominates(i, j))
+        continue;
+      doms.emplace_back(j);
+    }
+
     // If it's a non-conditional jump
     if (i->getTerminator()->getNumSuccessors() == 1) {
       // Get successor and delete terminator
       BasicBlock *succ = i->getTerminator()->getSuccessor(0);
       i->getTerminator()->eraseFromParent();
 
-      // Get next case
-      ConstantInt *case0 = switchI->findCaseDest(succ);
-
-      if (!case0) {
-        errs() << "Successor 0 of the terminator is nullptr.";
-        std::abort();
+      if (!doms.empty()) {
+        auto fn = insert_update_fn(M, i, idx_map, doms, switch_ty);
+        llvm::CallInst::Create(fn,
+                               {
+                                   visited_arr,
+                                   enc_case_arr,
+                                   key_arr,
+                               },
+                               "", i);
       }
 
+      auto idx_const =
+          ConstantInt::get(IntegerType::getInt32Ty(cx), idx_map[succ]);
+      auto case_ptr = llvm::GetElementPtrInst::Create(
+          switch_ty, enc_case_arr, {idx_const}, "case_ptr", i);
+      auto dec_case = new llvm::LoadInst(switch_ty, case_ptr, "dec_case", i);
+
       // Update switch_var and jump to the end of loop
-      new StoreInst(case0, switch_var, i);
+      new StoreInst(dec_case, switch_var, i);
+
       BranchInst::Create(loop_end, i);
       continue;
     }
@@ -209,21 +303,38 @@ void FlatteningPass::flatten(Function *f) const {
     // If it's a conditional jump
     if (i->getTerminator()->getNumSuccessors() == 2) {
       // Get next cases
-      auto *case0 = switchI->findCaseDest(i->getTerminator()->getSuccessor(0));
-      auto *case1 = switchI->findCaseDest(i->getTerminator()->getSuccessor(1));
+      auto succ0 = i->getTerminator()->getSuccessor(0);
+      auto succ1 = i->getTerminator()->getSuccessor(1);
 
-      if (!case0) {
-        errs() << "Successor 0 of the terminator is nullptr.";
-        std::abort();
+      auto orig_term = i->getTerminator();
+      auto *cond = cast<BranchInst>(orig_term)->getCondition();
+      orig_term->eraseFromParent();
+
+      if (!doms.empty()) {
+        auto fn = insert_update_fn(M, i, idx_map, doms, switch_ty);
+        llvm::CallInst::Create(fn,
+                               {
+                                   visited_arr,
+                                   enc_case_arr,
+                                   key_arr,
+                               },
+                               "", i);
       }
 
-      // Create a SelectInst
-      auto *br = cast<BranchInst>(i->getTerminator());
-      SelectInst *sel = SelectInst::Create(br->getCondition(), case0, case1, "",
-                                           i->getTerminator());
+      auto idx0_const =
+          ConstantInt::get(IntegerType::getInt32Ty(cx), idx_map[succ0]);
+      auto case0_ptr = llvm::GetElementPtrInst::Create(
+          switch_ty, enc_case_arr, {idx0_const}, "case0_ptr", i);
+      auto dec_case0 = new llvm::LoadInst(switch_ty, case0_ptr, "dec_case0", i);
 
-      // Erase terminator
-      i->getTerminator()->eraseFromParent();
+      auto idx1_const =
+          ConstantInt::get(IntegerType::getInt32Ty(cx), idx_map[succ1]);
+      auto case1_ptr = llvm::GetElementPtrInst::Create(
+          switch_ty, enc_case_arr, {idx1_const}, "case1_ptr", i);
+      auto dec_case1 = new llvm::LoadInst(switch_ty, case1_ptr, "dec_case1", i);
+
+      SelectInst *sel = SelectInst::Create(cond, dec_case0, dec_case1, "", i);
+
       // Update switch_var and jump to the end of loop
       new StoreInst(sel, switch_var, i);
       BranchInst::Create(loop_end, i);
@@ -235,6 +346,6 @@ void FlatteningPass::flatten(Function *f) const {
 }
 
 FlatteningPass::FlatteningPass(uint32_t switch_bit_width)
-    : switch_bit_width(switch_bit_width) {}
+    : bit_width(switch_bit_width) {}
 
 } // namespace labyrinth

@@ -7,7 +7,8 @@
 #include <cstdint>
 
 template <typename T>
-std::enable_if<effolkronium::details::is_uniform_int<T>::value, T>::type
+typename std::enable_if<effolkronium::details::is_uniform_int<T>::value,
+                        T>::type
 rand_unique(llvm::iterator_range<T *> rands) {
   using Random = effolkronium::random_thread_local;
   while (true) {
@@ -17,6 +18,10 @@ rand_unique(llvm::iterator_range<T *> rands) {
       return rand;
     }
   }
+}
+
+constexpr uint64_t bit_mask_by_width(uint32_t n) {
+  return ~uint64_t(0UL) >> (64 - n);
 }
 
 #endif
