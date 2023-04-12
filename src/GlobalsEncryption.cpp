@@ -25,6 +25,9 @@ GlobalsEncryptionPass::GlobalsEncryptionPass(bool only_str, uint8_t obf_time)
 
 auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
     -> PreservedAnalyses {
+  if (M.getGlobalList().empty()) {
+    return PreservedAnalyses::all();
+  }
   for (uint8_t priority : std::views::iota(0U, obf_time)) {
     for (auto &gv : M.getGlobalList()) {
       bool is_int_ty = gv.getValueType()->isIntegerTy();
@@ -105,7 +108,7 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
       }
     }
   }
-  return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
 }
 
 std::string genHashedName(GlobalVariable *gv, int priority) {

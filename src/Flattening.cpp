@@ -28,11 +28,14 @@ auto FlatteningPass::run(Module &M, ModuleAnalysisManager &AM) const
   for (auto &fn : M.functions()) {
     fns.emplace_back(&fn);
   }
+  if (fns.empty()) {
+    return PreservedAnalyses::all();
+  }
   for (auto fn : fns) {
     flatten(&M, fn);
   }
 
-  return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
 }
 
 void fix_stack(Function *F) {
