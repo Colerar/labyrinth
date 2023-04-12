@@ -5,6 +5,8 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/Utils/LowerSwitch.h"
 
 using Random = effolkronium::random_thread_local;
 
@@ -139,6 +141,13 @@ void FlatteningPass::flatten(Module *M, Function *f) const {
   auto &cx = f->getContext();
   auto switch_ty = IntegerType::getIntNTy(cx, bit_width);
   auto bool_ty = IntegerType::getIntNTy(cx, 1);
+
+  llvm::PassBuilder pb;
+  llvm::FunctionAnalysisManager fam;
+  llvm::FunctionPassManager fpm;
+  pb.registerFunctionAnalyses(fam);
+  fpm.addPass(llvm::LowerSwitchPass());
+  fpm.run(*f, fam);
 
   // Nothing to flatten
   if (orig_bb.size() <= 1)
