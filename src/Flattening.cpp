@@ -142,13 +142,6 @@ void FlatteningPass::flatten(Module *M, Function *f) const {
   auto switch_ty = IntegerType::getIntNTy(cx, bit_width);
   auto bool_ty = IntegerType::getIntNTy(cx, 1);
 
-  llvm::PassBuilder pb;
-  llvm::FunctionAnalysisManager fam;
-  llvm::FunctionPassManager fpm;
-  pb.registerFunctionAnalyses(fam);
-  fpm.addPass(llvm::LowerSwitchPass());
-  fpm.run(*f, fam);
-
   // Nothing to flatten
   if (orig_bb.size() <= 1)
     return;
