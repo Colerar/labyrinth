@@ -1,9 +1,11 @@
 #include "labyrinth/Registry.h"
 #include "labyrinth/Flattening.h"
 #include "labyrinth/GlobalsEncryption.h"
+#include "labyrinth/Mba.h"
 #include "llvm/Passes/PassPlugin.h"
 
-using labyrinth::GlobalsEncryptionPass, labyrinth::FlatteningPass;
+using labyrinth::GlobalsEncryptionPass, labyrinth::FlatteningPass,
+    labyrinth::MbaPass;
 using llvm::ModulePassManager, llvm::OptimizationLevel;
 using llvm::outs, llvm::errs;
 using llvm::StringRef;
@@ -47,6 +49,9 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
           errs() << "Invalid value for `" << k << "`: " << v << '\n';
           return false;
         }
+      } else {
+        errs() << "Unknown configuration key `" << k << "`\n";
+        return false;
       }
       return true;
     });
@@ -64,6 +69,37 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
     manager.addPass(FlatteningPass(width));
     return true;
   });
+  builder.registerPipelineParsingCallback(
+      [](StringRef args, llvm::ModulePassManager &manager, auto) {
+        uint8_t times = 1, prob = 40, terms = 10;
+        bool status = parseArgs(args, "mba", [&](StringRef k, StringRef v) {
+          if (k.equals_insensitive("times")) {
+            if (!to_integer(v, times, 10)) {
+              errs() << "Invalid value for `" << k << "`: " << v << '\n';
+              return false;
+            }
+          } else if (k.equals_insensitive("prob")) {
+            if (!to_integer(v, prob, 10) || prob > 100 || prob < 1) {
+              errs() << "Invalid value for `" << k << "`: " << v << '\n';
+              return false;
+            }
+          } else if (k.equals_insensitive("terms")) {
+            if (!to_integer(v, terms, 10)) {
+              errs() << "Invalid value for `" << k << "`: " << v << '\n';
+              return false;
+            }
+          } else {
+            errs() << "Unknown configuration key `" << k << "`\n";
+            return false;
+          }
+          return true;
+        });
+        if (!status) {
+          return false;
+        }
+        manager.addPass(MbaPass(times, prob, terms));
+        return true;
+      });
 }
 
 bool parseArgs(
