@@ -1,5 +1,6 @@
 #include "labyrinth/GlobalsEncryption.h"
 #include "effolkronium/random.hpp"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/BLAKE3.h"
@@ -25,11 +26,11 @@ GlobalsEncryptionPass::GlobalsEncryptionPass(bool only_str, uint8_t obf_time)
 
 auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
     -> PreservedAnalyses {
-  if (M.getGlobalList().empty()) {
+  if (M.globals().empty()) {
     return PreservedAnalyses::all();
   }
   for (uint8_t priority : std::views::iota(0U, obf_time)) {
-    for (auto &gv : M.getGlobalList()) {
+    for (auto &gv : M.globals()) {
       bool is_int_ty = gv.getValueType()->isIntegerTy();
       bool is_arr_ty = gv.getValueType()->isArrayTy();
       bool is_struct_ty = gv.getValueType()->isStructTy();

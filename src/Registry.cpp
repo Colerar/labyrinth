@@ -1,7 +1,9 @@
 #include "labyrinth/Registry.h"
+#include "labyrinth/Call.h"
 #include "labyrinth/Flattening.h"
 #include "labyrinth/GlobalsEncryption.h"
 #include "labyrinth/Mba.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Passes/PassPlugin.h"
 
 using labyrinth::GlobalsEncryptionPass, labyrinth::FlatteningPass,
@@ -13,6 +15,7 @@ using llvm::StringRef;
 namespace labyrinth {
 
 void passBuilderCallback(llvm::PassBuilder &builder) {
+  // GlobalEncryption
   builder.registerPipelineParsingCallback([](StringRef args,
                                              ModulePassManager &manager, auto) {
     bool only_str = false;
@@ -40,6 +43,8 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
     manager.addPass(GlobalsEncryptionPass(only_str, obf_time));
     return true;
   });
+
+  // Flattening
   builder.registerPipelineParsingCallback([](StringRef args,
                                              ModulePassManager &manager, auto) {
     uint32_t width = 64;
@@ -69,6 +74,8 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
     manager.addPass(FlatteningPass(width));
     return true;
   });
+
+  // MBA
   builder.registerPipelineParsingCallback(
       [](StringRef args, llvm::ModulePassManager &manager, auto) {
         uint8_t times = 1, prob = 40, terms = 10;
@@ -98,6 +105,17 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
           return false;
         }
         manager.addPass(MbaPass(times, prob, terms));
+        return true;
+      });
+
+  // Call
+  builder.registerPipelineParsingCallback(
+      [](StringRef args, ModulePassManager &manager, auto) {
+        if (!parseArgs(args, "cal")) {
+          return false;
+        }
+
+        manager.addPass(CallObfPass());
         return true;
       });
 }
