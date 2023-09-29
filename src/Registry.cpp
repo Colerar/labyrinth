@@ -1,5 +1,4 @@
 #include "labyrinth/Registry.h"
-#include "labyrinth/Call.h"
 #include "labyrinth/Flattening.h"
 #include "labyrinth/GlobalsEncryption.h"
 #include "labyrinth/Mba.h"
@@ -105,17 +104,6 @@ void passBuilderCallback(llvm::PassBuilder &builder) {
           return false;
         }
         manager.addPass(MbaPass(times, prob, terms));
-        return true;
-      });
-
-  // Call
-  builder.registerPipelineParsingCallback(
-      [](StringRef args, ModulePassManager &manager, auto) {
-        if (!parseArgs(args, "cal")) {
-          return false;
-        }
-
-        manager.addPass(CallObfPass());
         return true;
       });
 }
