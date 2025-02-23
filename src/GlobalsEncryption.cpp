@@ -7,6 +7,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
+#include <cstdint>
 #include <ranges>
 
 using Random = effolkronium::random_thread_local;
@@ -38,7 +39,7 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
         continue;
       if (gv.getSection() == "llvm.metadata")
         continue;
-      if (only_str && !gv.getName().startswith(".str"))
+      if (only_str && !gv.getName().starts_with(".str"))
         continue;
 
       auto *init = gv.getInitializer();
@@ -49,7 +50,8 @@ auto GlobalsEncryptionPass::run(Module &M, ModuleAnalysisManager &AM)
 
       if (is_int_ty) {
         auto *data = cast<ConstantInt>(init);
-        uint64_t mask = data->getType()->getBitMask();
+        uint64_t bitWidth = data->getType()->getIntegerBitWidth();
+        uint64_t mask = (bitWidth == 64) ? UINT64_MAX : (1ULL << bitWidth) - 1;
         uint64_t key = Random::get<uint64_t>() & mask;
         auto *encrypted =
             ConstantInt::get(gv.getValueType(), data->getZExtValue() ^ key);

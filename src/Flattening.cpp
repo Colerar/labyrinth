@@ -56,10 +56,10 @@ void fix_stack(Function *F) {
     }
   }
   for (llvm::PHINode *PN : origPHI) {
-    DemotePHIToStack(PN, entryBB.getTerminator());
+    DemotePHIToStack(PN, entryBB.getFirstNonPHI()->getIterator());
   }
   for (llvm::Instruction *I : origReg) {
-    DemoteRegToStack(*I, entryBB.getTerminator());
+    DemoteRegToStack(*I, I->isVolatile(), entryBB.getFirstNonPHI()->getIterator());
   }
 }
 
